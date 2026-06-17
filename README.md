@@ -327,8 +327,9 @@ pointed at the host). The first login auto-registers your device.
 ### Production deploy
 
 VPS + Cloudflare Tunnel or Caddy + Let's Encrypt — see
-[docs/deploy.md](docs/deploy.md) for the full walkthrough, including
-how to keep the LLM cost at zero by running everything locally.
+[docs/deploy.md](docs/deploy.md) for the conceptual overview, or
+[docs/setup-vps.md](docs/setup-vps.md) for a step-by-step guide that
+takes a brand-new Ubuntu VPS all the way to a working deployment.
 
 ### Security model
 

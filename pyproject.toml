@@ -31,6 +31,10 @@ dependencies = [
     "tqdm>=4.67.1",
     "typing-extensions>=4.14.0",
     "yfinance>=1.4.1",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pyyaml>=6.0.2",
+    "itsdangerous>=2.2.0",
 ]
 
 [project.optional-dependencies]
@@ -44,12 +48,26 @@ dev = [
 bedrock = [
     "langchain-aws>=1.5.0",
 ]
+# Web UI: FastAPI + mobile-first SPA. Optional so the core install
+# stays lean: pip install "tradingagents[web]".
+web = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pyyaml>=6.0.2",
+    "itsdangerous>=2.2.0",
+]
 
 [project.scripts]
 tradingagents = "cli.main:app"
 
+# Exclude the web/ directory from automatic package discovery: setuptools
+# would otherwise pick it up as a top-level package and refuse to install
+# (it conflicts with the real `web` namespace on PyPI). The web app is
+# only meant to be run via `uvicorn web.server:app`, not imported as a
+# distribution.
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*"]
+exclude = ["web*", "web.*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]

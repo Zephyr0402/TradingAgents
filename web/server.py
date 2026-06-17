@@ -51,12 +51,20 @@ logging.basicConfig(level=os.environ.get("TRADINGAGENTS_LOG_LEVEL", "INFO"))
 MAX_CONCURRENT = int(os.environ.get("TRADINGAGENTS_WEB_MAX_CONCURRENT", "2"))
 _run_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
-# Hard ceiling on a single analysis. If ollama hangs (TCP connection
-# accepted but no response) we want the event loop to free the semaphore
-# and mark the task failed, not block every other request forever. The
-# underlying thread keeps running — Python can't kill it — but the user
-# gets a clear error and the next submit isn't starved.
-RUN_TIMEOUT_SECONDS = int(os.environ.get("TRADINGAGENTS_WEB_RUN_TIMEOUT", "900"))
+# Hard ceiling on a single analysis. The framework runs a multi-agent
+# pipeline (analysts + bull/bear debate + trader + risk debaters +
+# portfolio manager) and a real run with the local ollama backend
+# routinely takes an hour or more — analyst reports are 1-3 minutes each,
+# the risk-debate rounds are another few minutes, and any single hung
+# ollama request adds 30+ seconds. A 15-minute ceiling (the v0.2.6
+# default) was killing every legitimate run, so the default is now 90
+# minutes. Override with TRADINGAGENTS_WEB_RUN_TIMEOUT in the env file.
+# On timeout the event loop frees the semaphore and marks the task
+# failed; the underlying thread keeps running (Python can't kill it)
+# but the next submit isn't starved.
+RUN_TIMEOUT_SECONDS = int(
+    os.environ.get("TRADINGAGENTS_WEB_RUN_TIMEOUT", "5400")
+)
 
 # Dedicated pool for the blocking propagate() call. Sized at MAX_CONCURRENT
 # so a queue of stuck jobs doesn't grow unbounded.

@@ -27,8 +27,10 @@ Breaking changes within the 0.x line are called out explicitly.
 - **Web UI: hung ollama blocks every other request.** A stuck
   `propagate()` call used to hold a semaphore slot forever. The worker
   is now wrapped in `asyncio.wait_for` with
-  `TRADINGAGENTS_WEB_RUN_TIMEOUT` (default 900s); on timeout the task
-  is marked failed and the semaphore is released.
+  `TRADINGAGENTS_WEB_RUN_TIMEOUT` (default 5400s — 90 minutes, sized
+  for the multi-agent pipeline + local ollama where one analyst
+  report alone takes 1-3 minutes); on timeout the task is marked
+  failed and the semaphore is released.
 - **Web UI: SQLite cross-thread crash.** Worker threads could not
   touch the connection created on the event-loop thread. SQLite is
   now opened with `check_same_thread=False`.

@@ -1,0 +1,7 @@
+# Replace with your real domain. Caddy will request a Let's Encrypt cert
+# automatically the first time it starts; DNS for this hostname must point
+# at the host's public IP by then.
+tradingagents.example.com {
+    encode gzip
+    reverse_proxy tradingagents:8000
+}

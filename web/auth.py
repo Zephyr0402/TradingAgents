@@ -143,6 +143,30 @@ def _normalize_ua(ua: str) -> str:
     return _VERSION_TOKEN.sub("x", ua)[:200]
 
 
+def _peer_is_trusted(request: Request) -> bool:
+    """True if the immediate TCP peer is in the trusted-proxy set.
+
+    Used both for X-Forwarded-For (in _client_ip) and for CF-IPCountry
+    (in _country_from_request). Centralized so the policy lives in one
+    place: a direct connection to the backend can lie about client IP /
+    country headers, but a request that arrived via Caddy+Cloudflare
+    is allowed to set them.
+    """
+    peer = request.client.host if request.client else "unknown"
+    try:
+        peer_ip = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    for net in _TRUSTED_PROXIES:
+        if isinstance(net, ipaddress.IPv4Network) and isinstance(peer_ip, ipaddress.IPv4Address):
+            if peer_ip in net:
+                return True
+        elif isinstance(net, ipaddress.IPv6Network) and isinstance(peer_ip, ipaddress.IPv6Address):
+            if peer_ip in net:
+                return True
+    return False
+
+
 def _client_ip(request: Request) -> str:
     """Pick the best client IP.
 
@@ -152,27 +176,7 @@ def _client_ip(request: Request) -> str:
     its IP and slip past the device whitelist.
     """
     peer = request.client.host if request.client else "unknown"
-    peer_ip: Optional[ipaddress.IPv4Address | ipaddress.IPv6Address]
-    try:
-        peer_ip = ipaddress.ip_address(peer)
-    except ValueError:
-        peer_ip = None
-
-    trusted = False
-    if peer_ip is not None:
-        for net in _TRUSTED_PROXIES:
-            # IPv4Network only contains IPv4Address, same for v6 — skip
-            # mismatched families rather than raising.
-            if isinstance(net, ipaddress.IPv4Network) and isinstance(peer_ip, ipaddress.IPv4Address):
-                if peer_ip in net:
-                    trusted = True
-                    break
-            elif isinstance(net, ipaddress.IPv6Network) and isinstance(peer_ip, ipaddress.IPv6Address):
-                if peer_ip in net:
-                    trusted = True
-                    break
-
-    if trusted:
+    if _peer_is_trusted(request):
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
             return forwarded.split(",")[0].strip()
@@ -195,6 +199,20 @@ def register_device(request: Request, label: Optional[str] = None) -> str:
     """Register the current device and return its fingerprint.
 
     Called automatically on first successful password login.
+
+    Records two extra "where in the world" hints that the user can see in
+    the Settings drawer as a sanity check on unfamiliar logins:
+
+    * ``country`` — pulled from the ``CF-IPCountry`` header that Cloudflare
+      adds at the edge. We only trust the header when the immediate peer
+      is in ``_TRUSTED_PROXIES`` (so a direct hit to the backend can't
+      forge a country). Country is two-letter ISO 3166-1 alpha-2
+      (e.g. ``"US"``) or ``"XX"`` when Cloudflare couldn't determine it.
+    * ``timezone`` — an IANA tz name like ``"America/Los_Angeles"`` sent
+      by the client in the ``X-TZ`` header on the login request. Optional;
+      browsers that don't supply it get ``"unknown"``. Sanity-checked
+      against a small whitelist of valid prefixes to reject obvious
+      garbage.
     """
     fp = _device_fingerprint(request)
     devices = _load_devices()
@@ -203,9 +221,51 @@ def register_device(request: Request, label: Optional[str] = None) -> str:
             "label": label or f"device-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}",
             "first_seen": datetime.now(timezone.utc).isoformat(),
             "user_agent": request.headers.get("user-agent", "unknown")[:200],
+            "country": _country_from_request(request),
+            "timezone": _timezone_from_request(request),
         }
         _save_devices(devices)
     return fp
+
+
+# Only trust CF-IPCountry when it comes from a real Cloudflare edge.
+# A direct connection to the backend could otherwise inject the header
+# and spoof a country. We piggy-back on the same trusted-proxy check
+# used for X-Forwarded-For via _peer_is_trusted().
+def _country_from_request(request: Request) -> str:
+    if not _peer_is_trusted(request):
+        return "XX"
+    raw = request.headers.get("cf-ipcountry", "").strip().upper()
+    if not raw:
+        return "XX"
+    # Cloudflare sends "XX" when it can't determine the country; pass
+    # that through unchanged. Otherwise it should be a 2-letter alpha-2
+    # code; reject anything longer to avoid storing a header that got
+    # concatenated with junk.
+    if len(raw) != 2 or not raw.isalpha():
+        return "XX"
+    return raw
+
+
+# Browser-supplied timezone. Anything that doesn't look like an IANA tz
+# is dropped to "unknown" so a hostile client can't pollute the
+# whitelist with arbitrary strings.
+_VALID_TZ_PREFIXES = (
+    "Africa/", "America/", "Antarctica/", "Asia/", "Atlantic/",
+    "Australia/", "Europe/", "Indian/", "Pacific/",
+)
+_UTC_TZ = "UTC"
+
+
+def _timezone_from_request(request: Request) -> str:
+    raw = request.headers.get("x-tz", "").strip()
+    if not raw or len(raw) > 64:
+        return "unknown"
+    if raw == _UTC_TZ:
+        return raw
+    if not any(raw.startswith(p) for p in _VALID_TZ_PREFIXES):
+        return "unknown"
+    return raw
 
 
 def list_devices() -> dict[str, dict]:

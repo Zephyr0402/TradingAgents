@@ -59,6 +59,12 @@ www.bvshen.com, bvshen.com {
             # in) and will honor CF-Connecting-IP from those ranges only.
             header_up X-Forwarded-For "{http.request.header.CF-Connecting-IP}"
             header_up X-Real-IP "{http.request.header.CF-Connecting-IP}"
+            # Also pass through CF-IPCountry so the device whitelist can
+            # record (and display) the country the user is logging in
+            # from. Same trust boundary as X-Forwarded-For — FastAPI only
+            # honors it when the immediate peer is in its trusted-proxy
+            # set.
+            header_up CF-IPCountry "{http.request.header.CF-IPCountry}"
         }
     }
 

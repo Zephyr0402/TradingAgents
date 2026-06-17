@@ -17,11 +17,27 @@ let toastTimer = null;
 const BASE = (document.querySelector('base')?.getAttribute('href') || '/').replace(/\/?$/, '/');
 const _api = (path) => `${BASE}api${path}`;
 
+// IANA timezone the browser is currently in (e.g. "America/Los_Angeles"),
+// resolved once at module load. The login request sends it in the X-TZ
+// header so the server can record it against the device fingerprint —
+// a hint for the user to spot "this is a new login from a new place"
+// in the Settings drawer. Empty string when the browser can't tell.
+const _TZ = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch {
+    return '';
+  }
+})();
+
 const api = {
   async login(password) {
     const r = await fetch(_api('/login'), {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        ...( _TZ ? { 'X-TZ': _TZ } : {}),
+      },
       body: JSON.stringify({ password }),
     });
     if (!r.ok) throw new Error('Wrong password');
@@ -91,6 +107,29 @@ function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[c]));
+}
+
+// Two-letter ISO country code → regional indicator flag emoji.
+// "US" → "🇺🇸", "XX" → "🌐". Returns "" for anything that isn't a
+// valid alpha-2 code so the caller can omit the flag.
+function _country_flag(code) {
+  if (!code || code.length !== 2) return '';
+  const A = 0x1F1E6;
+  const c1 = code.toUpperCase().charCodeAt(0) - 65;
+  const c2 = code.toUpperCase().charCodeAt(1) - 65;
+  if (c1 < 0 || c1 > 25 || c2 < 0 || c2 > 25) return '';
+  return String.fromCodePoint(A + c1) + String.fromCodePoint(A + c2);
+}
+
+// Pretty-print the device's login origin. The server sends:
+//   country  — 2-letter code from Cloudflare's CF-IPCountry, or "XX" / ""
+//   timezone — IANA tz name from the browser's X-TZ header, or "unknown"
+// We render something like "🇺🇸 America/Los_Angeles · Los Angeles"
+function _format_origin(country, tz) {
+  const flag = _country_flag(country);
+  const flagStr = country === 'XX' ? '🌐' : (flag || '🌐');
+  const tzStr = (tz && tz !== 'unknown') ? tz : 'tz unknown';
+  return `${flagStr} ${esc(tzStr)}`;
 }
 
 // Render markdown to HTML. marked.js is loaded as a global <script> before
@@ -332,19 +371,23 @@ function viewDetail() {
 }
 
 function viewSettings() {
-  const items = Object.entries(state.devices).map(([fp, d]) => `
+  const items = Object.entries(state.devices).map(([fp, d]) => {
+    const origin = _format_origin(d.country, d.timezone);
+    return `
     <div class="device-item">
       <div><strong>${esc(d.label || '(no label)')}</strong>
         <span class="fp"> · ${esc(fp)}</span>
       </div>
       <div class="ua">${esc(d.user_agent || '')}</div>
       <div class="ua">since ${esc(d.first_seen || '')}</div>
+      <div class="ua">${origin}</div>
       <div style="margin-top:6px">
         <button class="secondary" data-rm="${esc(fp)}"
                 style="width:auto;height:32px;padding:0 12px;font-size:13px">Remove</button>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   return `
     <div class="drawer-mask" id="drawerMask">

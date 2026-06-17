@@ -63,7 +63,7 @@ _run_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 # failed; the underlying thread keeps running (Python can't kill it)
 # but the next submit isn't starved.
 RUN_TIMEOUT_SECONDS = int(
-    os.environ.get("TRADINGAGENTS_WEB_RUN_TIMEOUT", "5400")
+    os.environ.get("TRADINGAGENTS_WEB_RUN_TIMEOUT", "7200")
 )
 
 # Dedicated pool for the blocking propagate() call. Sized at MAX_CONCURRENT

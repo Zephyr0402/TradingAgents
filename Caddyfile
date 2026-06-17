@@ -2,25 +2,28 @@
 # /trading-agents/ rather than the apex, so the rest of the domain stays
 # free for other things.
 #
-# IMPORTANT: This Caddyfile is set up for Cloudflare in front. The TLS cert
-# served to Cloudflare is a Cloudflare Origin Certificate, which Cloudflare
-# already trusts. Public clients never reach this server directly — they go
-# through Cloudflare's edge. See docs/deploy-cf.md for the full setup.
+# Cloudflare is in front of us as a reverse proxy. We support two
+# configurations on this origin:
+#
+#   1. CF proxy on (orange cloud) AND anyone reaching the origin directly
+#      over the public IP — caddy serves a public Let's Encrypt cert so
+#      both paths show 🔒 in the browser.
+#
+#   2. CF proxy off (gray cloud) — same LE cert handles direct traffic;
+#      CF just acts as authoritative DNS.
+#
+# We do NOT also use a Cloudflare Origin cert anymore. The previous setup
+# had a CF Origin cert on caddy and the public on CF's edge, which meant
+# that anyone bypassing CF (gray-cloud moment, an old DNS cache, a
+# laptop pointed at the VPS IP, etc.) got the untrusted Origin cert and
+# Chrome showed "Not Secure". Serving the same public LE cert on both
+# paths makes the site work the same way regardless of how the client
+# reached us.
 
 # ----- Global options -----
 
 {
-    # Cloudflare is in front of us. Caddy does NOT issue any public cert
-    # for this hostname — the public cert is on Cloudflare's edge. Caddy
-    # only needs the Cloudflare Origin Certificate, which is what
-    # Cloudflare expects on the backend. See the tls directive in the
-    # site block below.
-    #
-    # The cert and key are at /etc/caddy/certs/{cert.pem,key.pem}. You'll
-    # generate them in the Cloudflare dashboard (SSL/TLS → Origin Server
-    # → Create Certificate) and paste the contents into those files.
     email admin@bvshen.com
-    # No acme_ca: we don't want Caddy to talk to Let's Encrypt at all.
 }
 
 # ----- Site block -----
@@ -73,10 +76,7 @@ www.bvshen.com, bvshen.com {
         respond "Not Found" 404
     }
 
-    # Use the Cloudflare Origin Certificate. Caddy will read these files
-    # on each TLS handshake. Both files must be present or Caddy fails.
-    tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem {
-        # Cloudflare's edge supports modern TLS, so we can stick with the
-        # default cipher suite policy.
-    }
+    # No `tls` directive — caddy auto-issues a public Let's Encrypt cert
+    # for `www.bvshen.com` and `bvshen.com` via the HTTP-01 challenge on
+    # port 80. The cert is renewed automatically before expiry.
 }

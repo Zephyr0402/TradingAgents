@@ -10,9 +10,16 @@ let toastTimer = null;
 
 // ----- API ----------------------------------------------------------------
 
+// Base path the SPA is mounted under. Read from <base href> in index.html
+// (e.g. "/trading-agents/") so all API calls automatically work whether
+// the app is served at the domain root or behind a sub-path. When no
+// <base> is present, fall back to the origin root.
+const BASE = (document.querySelector('base')?.getAttribute('href') || '/').replace(/\/?$/, '/');
+const _api = (path) => `${BASE}api${path}`;
+
 const api = {
   async login(password) {
-    const r = await fetch('/api/login', {
+    const r = await fetch(_api('/login'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ password }),
@@ -21,25 +28,25 @@ const api = {
     return r.json();
   },
   async logout() {
-    await fetch('/api/logout', { method: 'POST' });
+    await fetch(_api('/logout'), { method: 'POST' });
   },
   async me() {
-    const r = await fetch('/api/me');
+    const r = await fetch(_api('/me'));
     if (r.status === 401) return null;
     return r.json();
   },
   async listTasks() {
-    const r = await fetch('/api/tasks');
+    const r = await fetch(_api('/tasks'));
     if (!r.ok) throw new Error('list failed');
     return r.json();
   },
   async getTask(id) {
-    const r = await fetch(`/api/tasks/${id}`);
+    const r = await fetch(_api(`/tasks/${id}`));
     if (!r.ok) throw new Error('not found');
     return r.json();
   },
   async submitTask(body) {
-    const r = await fetch('/api/tasks', {
+    const r = await fetch(_api('/tasks'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
@@ -51,16 +58,16 @@ const api = {
     return r.json();
   },
   async listDevices() {
-    const r = await fetch('/api/devices');
+    const r = await fetch(_api('/devices'));
     return r.json();
   },
   async listModels() {
-    const r = await fetch('/api/models');
+    const r = await fetch(_api('/models'));
     if (!r.ok) return { models: ['minimax-m3:cloud'], source: 'fallback' };
     return r.json();
   },
   async deleteDevice(fp) {
-    return fetch(`/api/devices/${fp}`, { method: 'DELETE' });
+    return fetch(_api(`/devices/${fp}`), { method: 'DELETE' });
   },
 };
 
@@ -353,6 +360,17 @@ function viewSettings() {
 // ----- Render -------------------------------------------------------------
 
 function render() {
+  // Preserve scroll position when re-rendering the *same* view (e.g. a
+  // status badge tick or a tab re-render); reset when navigating between
+  // views, where a fresh page should start at the top. Without this,
+  // any in-place re-render drops the user back to the top of the page
+  // and resets the .tabs horizontal scroll container too.
+  const prevView = render._lastView;
+  const savedY = (prevView === state.view) ? window.scrollY : 0;
+  const savedX = (prevView === state.view) ? window.scrollX : 0;
+  const tabsEl = document.querySelector('.tabs');
+  const savedTabX = (prevView === state.view && tabsEl) ? tabsEl.scrollLeft : 0;
+
   let html;
   if (state.view === 'login') html = viewLogin();
   else if (state.view === 'list') html = viewList();
@@ -366,6 +384,16 @@ function render() {
     root.innerHTML = html;
   }
   bind();
+
+  // Restore after the new DOM is in place. Browsers fire this lazily,
+  // so we hop to a microtask — the .tabs element may not exist yet on
+  // a same-view re-render that swapped the detail body, so guard it.
+  requestAnimationFrame(() => {
+    window.scrollTo(savedX, savedY);
+    const t = document.querySelector('.tabs');
+    if (t && savedTabX) t.scrollLeft = savedTabX;
+  });
+  render._lastView = state.view;
 }
 
 function bind() {
@@ -390,11 +418,12 @@ function bind() {
   // List
   $('#newTaskBtn')?.addEventListener('click', async () => {
     state.view = 'new';
+    // render() calls bind() at the end; we just need the model options
+    // populated into the new <select> elements. populateModelOptions()
+    // mutates the existing DOM (no re-render needed) and bind() does not
+    // depend on the option list, so no second bind() call here.
     render();
-    // Populate the model dropdowns after the DOM is in place. Awaited
-    // before binding so the change handler can rely on the new options.
     await populateModelOptions();
-    bind();
   });
   $('#logoutBtn')?.addEventListener('click', async () => {
     await api.logout();
@@ -448,10 +477,32 @@ function bind() {
   });
 
   // Detail tabs
+  //
+  // The naive approach (state.activeTab = ...; render()) drops the page's
+  // scroll position and resets the .tabs horizontal scroll back to 0, so
+  // tapping a tab on the right side looks like nothing happened. Instead,
+  // we patch only the two elements that actually change: the active class
+  // on the tab buttons and the rendered report HTML. The .tabs container
+  // keeps its scroll position, and the page keeps its vertical scroll.
   document.querySelectorAll('.tabs button').forEach(b => {
     b.addEventListener('click', () => {
-      state.activeTab = b.dataset.tab;
-      render();
+      const tab = b.dataset.tab;
+      if (tab === state.activeTab) return;
+      state.activeTab = tab;
+      document.querySelectorAll('.tabs button').forEach(x => {
+        x.classList.toggle('active', x.dataset.tab === tab);
+      });
+      const reportEl = document.querySelector('.report');
+      if (reportEl) {
+        const r = (state.selected?.reports || {})[tab] || '(no content)';
+        // md() returns a sanitized HTML string; assigning to innerHTML
+        // is safe (sanitize() strips <script>, event handlers, etc.).
+        reportEl.innerHTML = md(r);
+      }
+      // Make sure the newly active tab is visible in the (horizontally
+      // scrollable) .tabs row — otherwise tapping a right-edge tab
+      // appears to do nothing because the bar scrolls itself back.
+      b.scrollIntoView({ block: 'nearest', inline: 'center' });
     });
   });
 

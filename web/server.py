@@ -18,6 +18,7 @@ TRADINGAGENTS_WEB_DATA_DIR). Survives restarts.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -50,6 +51,20 @@ logging.basicConfig(level=os.environ.get("TRADINGAGENTS_LOG_LEVEL", "INFO"))
 MAX_CONCURRENT = int(os.environ.get("TRADINGAGENTS_WEB_MAX_CONCURRENT", "2"))
 _run_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
+# Hard ceiling on a single analysis. If ollama hangs (TCP connection
+# accepted but no response) we want the event loop to free the semaphore
+# and mark the task failed, not block every other request forever. The
+# underlying thread keeps running — Python can't kill it — but the user
+# gets a clear error and the next submit isn't starved.
+RUN_TIMEOUT_SECONDS = int(os.environ.get("TRADINGAGENTS_WEB_RUN_TIMEOUT", "900"))
+
+# Dedicated pool for the blocking propagate() call. Sized at MAX_CONCURRENT
+# so a queue of stuck jobs doesn't grow unbounded.
+_run_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=MAX_CONCURRENT,
+    thread_name_prefix="ta-propagate",
+)
+
 
 # ---------------------------------------------------------------------------
 # Storage
@@ -58,7 +73,11 @@ _run_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
 def _db() -> sqlite3.Connection:
     auth.WEB_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(auth.DB_FILE, isolation_level=None)
+    # check_same_thread=False: the worker thread that runs propagate() is
+    # not the event-loop thread that opened the connection. Safe because
+    # each request still uses its own connection and we serialize writes
+    # via _run_semaphore (plus WAL handles concurrent readers).
+    conn = sqlite3.connect(auth.DB_FILE, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -174,6 +193,18 @@ def _extract_reports(state: dict) -> dict[str, str]:
     }
 
 
+def _truncate(s: str, max_bytes: int) -> str:
+    """Cap a string to `max_bytes` UTF-8 bytes. Used to keep the front-end
+    responsive and prevent LLM blow-ups from filling SQLite.
+    """
+    if not s:
+        return s
+    b = s.encode("utf-8", errors="replace")
+    if len(b) <= max_bytes:
+        return s
+    return b[:max_bytes].decode("utf-8", errors="replace") + "\n…(truncated)"
+
+
 def _make_safe_config(user_cfg: dict) -> dict:
     """Build a TradingAgentsGraph config from the per-task settings.
 
@@ -205,13 +236,35 @@ async def _run_task(task_id: int) -> None:
 
             # TradingAgentsGraph() does real work; offload to a thread so the
             # event loop stays responsive (the other endpoints can serve
-            # status polls while a run is in flight).
-            final_state, rating = await asyncio.to_thread(
-                _propagate_blocking, row["ticker"], row["trade_date"], ta_cfg, row["asset_type"]
-            )
+            # status polls while a run is in flight). wait_for releases the
+            # semaphore and marks the task failed if ollama hangs longer
+            # than RUN_TIMEOUT_SECONDS — the worker thread keeps running
+            # in the background (Python can't kill it) but won't starve
+            # the next request.
+            loop = asyncio.get_running_loop()
+            try:
+                final_state, rating = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _run_executor,
+                        _propagate_blocking,
+                        row["ticker"],
+                        row["trade_date"],
+                        ta_cfg,
+                        row["asset_type"],
+                    ),
+                    timeout=RUN_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    f"propagate() exceeded {RUN_TIMEOUT_SECONDS}s — likely a "
+                    "hung ollama connection. The background thread is still "
+                    "running but this task is being marked failed so the "
+                    "queue can move on."
+                )
 
-            decision = final_state.get("final_trade_decision") or ""
+            decision = _truncate(final_state.get("final_trade_decision") or "", 200_000)
             reports = _extract_reports(final_state)
+            reports = {k: _truncate(v, 200_000) for k, v in reports.items()}
             finished = datetime.now(timezone.utc).isoformat()
             with _db() as conn:
                 conn.execute(
@@ -226,12 +279,19 @@ async def _run_task(task_id: int) -> None:
             logger.info("Task %d completed: %s rating=%s", task_id, row["ticker"], rating)
 
         except Exception as exc:
+            # Keep the traceback in server logs but persist a short message
+            # to the DB so a runaway LLM can't dump megabytes of stack
+            # frames into the API response.
             tb = traceback.format_exc(limit=4)
             logger.exception("Task %d failed: %s", task_id, exc)
             with _db() as conn:
                 conn.execute(
                     "UPDATE tasks SET status='failed', finished_at=?, error=? WHERE id=?",
-                    (datetime.now(timezone.utc).isoformat(), tb, task_id),
+                    (
+                        datetime.now(timezone.utc).isoformat(),
+                        _truncate(f"{type(exc).__name__}: {exc}", 500),
+                        task_id,
+                    ),
                 )
 
 
@@ -409,7 +469,7 @@ async def list_models(_=Depends(auth.require_session)) -> dict:
 # ----- tasks ---------------------------------------------------------------
 
 
-@app.post("/api/tasks", status_code=201)
+@app.post("/api/tasks")
 async def submit_task(
     body: TaskIn,
     background_tasks: BackgroundTasks,
@@ -423,6 +483,26 @@ async def submit_task(
             detail=f"Too many tasks in flight (limit {MAX_CONCURRENT * 2}). "
                    "Wait for an existing task to finish.",
         )
+
+    # Defense in depth: even if the front-end fires a duplicate submit (or
+    # a retry races with the first request), only one active task per
+    # (ticker, trade_date) can exist. Return the existing id with 200
+    # instead of 201 so callers can tell we deduplicated.
+    ticker = body.ticker.upper()
+    with _db() as conn:
+        existing = conn.execute(
+            """
+            SELECT id FROM tasks
+            WHERE ticker = ? AND trade_date = ? AND status IN ('pending', 'running')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (ticker, body.trade_date),
+        ).fetchone()
+        if existing:
+            return JSONResponse(
+                status_code=200,
+                content={"id": existing["id"], "deduplicated": True},
+            )
 
     # Pin the LLM stack to the local Ollama instance with the local model.
     # The frontend hides the picker; this guarantees the field can't be
@@ -446,12 +526,16 @@ async def submit_task(
                                created_at, config_json)
             VALUES (?, ?, ?, 'pending', ?, ?)
             """,
-            (body.ticker.upper(), body.trade_date, body.asset_type, now, json.dumps(cfg)),
+            (ticker, body.trade_date, body.asset_type, now, json.dumps(cfg)),
         )
         task_id = cur.lastrowid
 
     background_tasks.add_task(_run_task, task_id)
-    return {"id": task_id}
+    return Response(
+        status_code=201,
+        content=json.dumps({"id": task_id}),
+        media_type="application/json",
+    )
 
 
 @app.get("/api/tasks")

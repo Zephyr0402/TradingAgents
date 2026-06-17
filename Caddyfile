@@ -1,7 +1,75 @@
-# Replace with your real domain. Caddy will request a Let's Encrypt cert
-# automatically the first time it starts; DNS for this hostname must point
-# at the host's public IP by then.
-tradingagents.example.com {
+# Public entry for www.bvshen.com — the TradingAgents web UI is mounted at
+# /trading-agents/ rather than the apex, so the rest of the domain stays
+# free for other things.
+#
+# IMPORTANT: This Caddyfile is set up for Cloudflare in front. The TLS cert
+# served to Cloudflare is a Cloudflare Origin Certificate, which Cloudflare
+# already trusts. Public clients never reach this server directly — they go
+# through Cloudflare's edge. See docs/deploy-cf.md for the full setup.
+
+# ----- Global options -----
+
+{
+    # Cloudflare is in front of us. Caddy does NOT issue any public cert
+    # for this hostname — the public cert is on Cloudflare's edge. Caddy
+    # only needs the Cloudflare Origin Certificate, which is what
+    # Cloudflare expects on the backend. See the tls directive in the
+    # site block below.
+    #
+    # The cert and key are at /etc/caddy/certs/{cert.pem,key.pem}. You'll
+    # generate them in the Cloudflare dashboard (SSL/TLS → Origin Server
+    # → Create Certificate) and paste the contents into those files.
+    email admin@bvshen.com
+    # No acme_ca: we don't want Caddy to talk to Let's Encrypt at all.
+}
+
+# ----- Site block -----
+
+www.bvshen.com, bvshen.com {
     encode gzip
-    reverse_proxy tradingagents:8000
+
+    # Bind to all interfaces on 80 and 443. Port 80 is still useful so
+    # Cloudflare can do HTTP→HTTPS upgrades and so any leftover LE
+    # validation works.
+    log {
+        output stdout
+        level INFO
+    }
+
+    # Visiting the bare hostname or / gets redirected to /trading-agents/.
+    @root {
+        path / /
+    }
+    handle @root {
+        redir https://{host}/trading-agents/ 302
+    }
+
+    # The actual app. Strip the /trading-agents prefix before proxying, so
+    # FastAPI continues to see its app at "/" and the prefix is invisible
+    # to the backend. Port 8765 is the host side of the tradingagents
+    # service's published port in docker-compose.yml (container listens
+    # on 8000; host side is 8765).
+    handle /trading-agents/* {
+        uri strip_prefix /trading-agents
+        reverse_proxy 127.0.0.1:8765 {
+            # Trust the CF-Connecting-IP header so FastAPI sees the real
+            # client IP, not Cloudflare's edge IP. Caddy already knows
+            # Cloudflare's IP ranges (the `cloudflare` shorthand is built
+            # in) and will honor CF-Connecting-IP from those ranges only.
+            header_up X-Forwarded-For "{http.request.header.CF-Connecting-IP}"
+            header_up X-Real-IP "{http.request.header.CF-Connecting-IP}"
+        }
+    }
+
+    # Anything else → 404. The path-prefix app is the only thing we expose.
+    handle {
+        respond "Not Found" 404
+    }
+
+    # Use the Cloudflare Origin Certificate. Caddy will read these files
+    # on each TLS handshake. Both files must be present or Caddy fails.
+    tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem {
+        # Cloudflare's edge supports modern TLS, so we can stick with the
+        # default cipher suite policy.
+    }
 }

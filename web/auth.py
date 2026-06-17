@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import ipaddress
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,6 +50,28 @@ SESSION_COOKIE = "ta_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 COOKIE_SECURE = os.environ.get("TRADINGAGENTS_WEB_COOKIE_SECURE", "1") != "0"
 
+# Comma-separated list of CIDRs whose X-Forwarded-For we trust. The
+# defaults cover both same-host proxies (loopback) and the standard
+# Docker bridge network ranges so the Caddy container in docker-compose
+# can pass the real client IP through. Set
+# TRADINGAGENTS_TRUSTED_PROXIES="10.0.0.0/8,127.0.0.1/32" if your proxy
+# lives elsewhere. Without an explicit trust restriction any direct
+# connection (port scans, misconfigured firewall) could spoof its IP
+# and slip past the device whitelist.
+_TRUSTED_PROXIES_ENV = os.environ.get(
+    "TRADINGAGENTS_TRUSTED_PROXIES",
+    "127.0.0.0/8,::1/128,172.16.0.0/12,10.0.0.0/8",
+)
+_TRUSTED_PROXIES: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+for _raw in _TRUSTED_PROXIES_ENV.split(","):
+    _raw = _raw.strip()
+    if not _raw:
+        continue
+    try:
+        _TRUSTED_PROXIES.append(ipaddress.ip_network(_raw, strict=False))
+    except ValueError:
+        pass
+
 
 def get_password() -> str:
     """Return the shared password. Hard-fails if unset."""
@@ -65,9 +88,13 @@ def get_session_secret() -> bytes:
     WEB_DATA_DIR.mkdir(parents=True, exist_ok=True)
     if SECRETS_FILE.exists():
         return SECRETS_FILE.read_bytes()
+    # Atomic write: tmp + os.replace, so a crash mid-write doesn't leave a
+    # half-written file that would lock out every existing session.
     key = secrets.token_bytes(32)
-    SECRETS_FILE.write_bytes(key)
-    os.chmod(SECRETS_FILE, 0o600)
+    tmp = SECRETS_FILE.with_suffix(".tmp")
+    tmp.write_bytes(key)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, SECRETS_FILE)
     return key
 
 
@@ -79,9 +106,11 @@ def get_session_secret() -> bytes:
 def _device_fingerprint(request: Request) -> str:
     """Stable but loose device fingerprint.
 
-    Combines the first /16 of the IP with the User-Agent. Good enough to
-    distinguish "Bevis's iPhone" from "Bevis's MacBook" from "random scanner"
-    without storing PII.
+    Combines the first /24 of the IP with a normalized User-Agent that
+    has volatile version numbers stripped out. Good enough to distinguish
+    "Bevis's iPhone" from "Bevis's MacBook" from "random scanner" without
+    storing PII, and robust against OS / browser upgrades that would
+    otherwise re-fingerprint the same device.
     """
     ip = _client_ip(request)
     try:
@@ -97,17 +126,57 @@ def _device_fingerprint(request: Request) -> str:
     except ValueError:
         ip_part = "unknown"
 
-    ua = request.headers.get("user-agent", "unknown")
+    ua = _normalize_ua(request.headers.get("user-agent", "unknown"))
     raw = f"{ip_part}|{ua}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+# Tokenize a User-Agent and drop segments that change with software updates.
+# We keep device class + platform + engine; throw away version numbers and
+# patch-level build identifiers.
+_VERSION_TOKEN = re.compile(r"\d+(?:[._-]\d+)+")
+
+
+def _normalize_ua(ua: str) -> str:
+    if not ua:
+        return "unknown"
+    return _VERSION_TOKEN.sub("x", ua)[:200]
+
+
 def _client_ip(request: Request) -> str:
-    """Pick the best client IP, trusting X-Forwarded-For only from local proxies."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    """Pick the best client IP.
+
+    Only trust X-Forwarded-For when the immediate peer is one of the
+    configured trusted proxies (Caddy, by default loopback). Otherwise
+    use request.client.host — otherwise any direct connection can spoof
+    its IP and slip past the device whitelist.
+    """
+    peer = request.client.host if request.client else "unknown"
+    peer_ip: Optional[ipaddress.IPv4Address | ipaddress.IPv6Address]
+    try:
+        peer_ip = ipaddress.ip_address(peer)
+    except ValueError:
+        peer_ip = None
+
+    trusted = False
+    if peer_ip is not None:
+        for net in _TRUSTED_PROXIES:
+            # IPv4Network only contains IPv4Address, same for v6 — skip
+            # mismatched families rather than raising.
+            if isinstance(net, ipaddress.IPv4Network) and isinstance(peer_ip, ipaddress.IPv4Address):
+                if peer_ip in net:
+                    trusted = True
+                    break
+            elif isinstance(net, ipaddress.IPv6Network) and isinstance(peer_ip, ipaddress.IPv6Address):
+                if peer_ip in net:
+                    trusted = True
+                    break
+
+    if trusted:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return peer
 
 
 def _load_devices() -> dict[str, dict]:

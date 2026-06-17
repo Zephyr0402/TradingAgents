@@ -27,6 +27,12 @@
 
 # TradingAgents: Multi-Agents LLM Financial Trading Framework
 
+> **This is a personal fork** maintained by [@Zephyr0402](https://github.com/Zephyr0402) with a
+> mobile-first Web UI on top of the upstream [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents).
+> The CLI and Python package below work exactly as in upstream. The Web UI
+> section near the bottom is the only addition — see
+> [Web UI (this fork)](#web-ui-this-fork) for details.
+
 ## News
 - [2026-05] **TradingAgents v0.2.5** released with the grounded Sentiment Analyst, GPT-5.5 etc. model coverage, Qwen/GLM/MiniMax dual-region support, `TRADINGAGENTS_*` env-var configurability with API-key auto-detection, remote Ollama support, non-US alpha benchmarks, and ticker path-traversal hardening. See [CHANGELOG.md](CHANGELOG.md) for the full list.
 - [2026-04] **TradingAgents v0.2.4** released with structured-output agents (Research Manager, Trader, Portfolio Manager), LangGraph checkpoint resume, persistent decision log, DeepSeek/Qwen/GLM/Azure provider support, Docker, and a Windows UTF-8 encoding fix.
@@ -51,7 +57,7 @@
 
 <div align="center">
 
-🚀 [TradingAgents](#tradingagents-framework) | ⚡ [Installation & CLI](#installation-and-cli) | 🎬 [Demo](https://www.youtube.com/watch?v=90gr5lwjIho) | 📦 [Package Usage](#tradingagents-package) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
+🚀 [TradingAgents](#tradingagents-framework) | ⚡ [Installation & CLI](#installation-and-cli) | 🌐 [Web UI](#web-ui-this-fork) | 🎬 [Demo](https://www.youtube.com/watch?v=90gr5lwjIho) | 📦 [Package Usage](#tradingagents-package) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
 
 </div>
 
@@ -105,9 +111,12 @@ Our framework decomposes complex trading tasks into specialized roles.
 
 Clone TradingAgents:
 ```bash
-git clone https://github.com/TauricResearch/TradingAgents.git
+git clone https://github.com/Zephyr0402/TradingAgents.git
 cd TradingAgents
 ```
+
+> For the original CLI/Python-only version, see
+> [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents).
 
 Create a virtual environment in any of your favorite environment managers:
 ```bash
@@ -266,6 +275,73 @@ config["checkpoint_enabled"] = True
 ta = TradingAgentsGraph(config=config)
 _, decision = ta.propagate("NVDA", "2026-01-15")
 ```
+
+## Web UI (this fork)
+
+A mobile-first personal web app on top of the same `TradingAgentsGraph` engine.
+Designed for a small trusted group (you + a few friends) rather than public
+use — auth is a single shared password plus a per-device fingerprint
+whitelist.
+
+<p align="center">
+  <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
+</p>
+
+### Features
+
+- **Mobile-first SPA** with dark theme, large tap targets, and a 12-tab
+  detail view (analyst reports, researcher debate, trader plan, risk debate)
+- **Background job queue** — submit a task, walk away, the list polls
+  every 3 s and lights up the rating badge when it finishes
+- **Server-side markdown rendering** of agent reports via a vendored
+  marked.js (no CDN dependency)
+- **Device whitelist** — first login auto-registers that device; revoke
+  from the gear icon (⚙) → Devices
+- **Model dropdown** populated from your local Ollama instance with size
+  hints, 30 s cache, fallback to a default model if Ollama is unreachable
+- **Local LLM by default** — `llm_provider` and `minimax-m3:cloud` are
+  hard-coded in `web/server.py`; swap the two constants to retarget
+
+### Quick start
+
+```bash
+git clone https://github.com/Zephyr0402/TradingAgents.git
+cd TradingAgents
+
+# Web UI needs a password and a session-signing secret. Server refuses
+# to start without TRADINGAGENTS_WEB_PASSWORD.
+echo "TRADINGAGENTS_WEB_PASSWORD=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')" >> .env
+echo "TRADINGAGENTS_WEB_SECRET=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" >> .env
+
+# Pull a model into the bundled Ollama container
+docker compose up -d ollama
+docker compose exec ollama ollama pull minimax-m3:cloud
+
+# Bring up the web app (FastAPI on :8000 behind Caddy for HTTPS)
+docker compose up -d --build
+```
+
+Open `http://localhost:8765` (LAN) or your public domain (after DNS is
+pointed at the host). The first login auto-registers your device.
+
+### Production deploy
+
+VPS + Cloudflare Tunnel or Caddy + Let's Encrypt — see
+[docs/deploy.md](docs/deploy.md) for the full walkthrough, including
+how to keep the LLM cost at zero by running everything locally.
+
+### Security model
+
+- One shared password (`TRADINGAGENTS_WEB_PASSWORD`), constant-time
+  compared server-side
+- 30-day session cookie signed with `itsdangerous` using
+  `TRADINGAGENTS_WEB_SECRET`
+- Device fingerprint = `sha256(ip/24 + user-agent)[:16]` — coarse
+  enough to survive cellular IP rotation, fine enough to split a
+  household
+- No public rate limiting beyond `MAX_CONCURRENT * 2` queued tasks
+- **Not a public service.** Don't put it on a guessable URL with a
+  weak password.
 
 ## Reproducibility
 

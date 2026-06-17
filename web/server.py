@@ -118,6 +118,40 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
 
 
+def _reap_orphan_tasks() -> int:
+    """Mark tasks stuck in 'running' or 'pending' as failed.
+
+    A web-service restart (or hard kill) leaves any in-flight task with
+    status='running' in the DB but the worker thread is gone — the
+    timeout watchdog in ``_run_task`` is part of the same coroutine that
+    died, so it never gets a chance to mark the task failed. Without
+    this sweep the task would block dedupe forever (a new submit of the
+    same (ticker, date) pair would return the dead id) and the UI
+    would show "running" indefinitely.
+
+    We run this once at service startup so the DB always reflects
+    reality: every task has a finished_at and a terminal status.
+
+    Returns the number of rows reaped.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    reason = (
+        "Aborted: web service was restarted while this task was in flight. "
+        "The worker thread was killed and the timeout watchdog never had a "
+        "chance to mark the task failed. Please resubmit."
+    )
+    with _db() as conn:
+        cur = conn.execute(
+            """
+            UPDATE tasks
+            SET status='failed', finished_at=?, error=?
+            WHERE status IN ('pending', 'running')
+            """,
+            (now, reason),
+        )
+        return cur.rowcount
+
+
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
@@ -322,6 +356,9 @@ async def lifespan(app: FastAPI):
     # on first request.
     auth.get_password()
     init_db()
+    reaped = _reap_orphan_tasks()
+    if reaped:
+        logger.warning("Reaped %d orphan task(s) stuck in pending/running", reaped)
     logger.info("Web UI ready. Data dir: %s", auth.WEB_DATA_DIR)
     yield
 

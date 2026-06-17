@@ -32,6 +32,14 @@ Breaking changes within the 0.x line are called out explicitly.
   report alone takes 1-3 minutes and a full run routinely exceeds
   an hour); on timeout the task is marked failed and the semaphore
   is released.
+- **Web UI: in-flight task turns into a zombie after a service restart.**
+  Restarting uvicorn (e.g. to roll out a new build) killed the worker
+  thread but left the task row in `running` status — the timeout
+  watchdog in `_run_task` is part of the same coroutine that died, so
+  it never marked the row failed. The new task would block dedupe
+  forever and the UI would show "running" until manually repaired.
+  `_reap_orphan_tasks()` now sweeps pending/running rows at service
+  startup and marks them failed with a clear reason.
 - **Web UI: SQLite cross-thread crash.** Worker threads could not
   touch the connection created on the event-loop thread. SQLite is
   now opened with `check_same_thread=False`.

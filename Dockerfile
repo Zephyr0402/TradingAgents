@@ -25,4 +25,7 @@ WORKDIR /home/appuser/app
 
 COPY --from=builder --chown=appuser:appuser /build .
 
-ENTRYPOINT ["tradingagents"]
+# Default to launching the web UI (`docker compose up tradingagents`).
+# The CLI is still available by overriding the command:
+#   docker compose run --rm tradingagents tradingagents analyze NVDA 2026-01-15
+ENTRYPOINT ["uvicorn", "web.server:app", "--host", "0.0.0.0", "--port", "8000"]

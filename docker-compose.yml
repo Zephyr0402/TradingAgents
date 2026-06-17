@@ -1,35 +1,66 @@
 services:
+  # Web UI for TradingAgents. The LLM stack is pinned to a local Ollama
+  # instance (see web/server.py), so we always bring up ollama alongside.
   tradingagents:
     build: .
     env_file:
       - .env
+    environment:
+      # Web UI config. TRADINGAGENTS_WEB_PASSWORD is required (server refuses
+      # to start without it). The secret signs session cookies; generate a
+      # long random value in production.
+      - TRADINGAGENTS_WEB_PASSWORD=${TRADINGAGENTS_WEB_PASSWORD:?set a password}
+      - TRADINGAGENTS_WEB_SECRET=${TRADINGAGENTS_WEB_SECRET:-}
+      - TRADINGAGENTS_WEB_DATA_DIR=/home/appuser/.tradingagents/web
+      - TRADINGAGENTS_WEB_MAX_CONCURRENT=2
+      - TRADINGAGENTS_LOG_LEVEL=INFO
+      # Point TradingAgents at the sibling ollama container. The `api`
+      # key is a placeholder — Ollama's /v1 endpoint accepts anything when
+      # the model allows anonymous access.
+      - LLM_PROVIDER=ollama
+      - OLLAMA_BASE_URL=http://ollama:11434/v1
+      - OPENAI_BASE_URL=http://ollama:11434/v1
+      - OPENAI_API_KEY=ollama
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
-    tty: true
-    stdin_open: true
+      # Mount web/ read-only so frontend tweaks show up on the next page
+      # reload without rebuilding the image. The image still bakes web/ in
+      # as a fallback for production (no host mount).
+      - ./web:/home/appuser/app/web:ro
+    ports:
+      # Expose on host so Caddy/Cloudflare can reverse-proxy. Change the
+      # host-side port if 8765 is taken.
+      - "127.0.0.1:8765:8000"
+    depends_on:
+      - ollama
 
+  # Local Ollama. Pull the model once with:
+  #   docker compose exec ollama ollama pull minimax-m3:cloud
+  # (substitute whatever model is in web/server.py's LOCAL_MODEL).
   ollama:
     image: ollama/ollama:latest
     volumes:
       - ollama_data:/root/.ollama
-    profiles:
-      - ollama
 
-  tradingagents-ollama:
-    build: .
-    env_file:
-      - .env
-    environment:
-      - LLM_PROVIDER=ollama
+  # Local HTTPS reverse proxy. Caddy auto-issues a cert via Let's Encrypt for
+  # any domain whose DNS points at the host. If you'd rather not expose 80/443
+  # publicly, delete this service and use a Cloudflare Tunnel instead (see
+  # docs/deploy.md).
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
     volumes:
-      - tradingagents_data:/home/appuser/.tradingagents
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
     depends_on:
-      - ollama
-    tty: true
-    stdin_open: true
-    profiles:
-      - ollama
+      - tradingagents
 
 volumes:
   tradingagents_data:
   ollama_data:
+  caddy_data:
+  caddy_config:

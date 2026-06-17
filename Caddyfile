@@ -46,12 +46,13 @@ www.bvshen.com, bvshen.com {
 
     # The actual app. Strip the /trading-agents prefix before proxying, so
     # FastAPI continues to see its app at "/" and the prefix is invisible
-    # to the backend. Port 8765 is the host side of the tradingagents
-    # service's published port in docker-compose.yml (container listens
-    # on 8000; host side is 8765).
+    # to the backend. The web service listens on host port 8000 — whether
+    # that's a docker-compose container published at 8000:8000, a
+    # systemd-managed uvicorn, or a manually launched process, the
+    # Caddyfile stays the same.
     handle /trading-agents/* {
         uri strip_prefix /trading-agents
-        reverse_proxy 127.0.0.1:8765 {
+        reverse_proxy 127.0.0.1:8000 {
             # Trust the CF-Connecting-IP header so FastAPI sees the real
             # client IP, not Cloudflare's edge IP. Caddy already knows
             # Cloudflare's IP ranges (the `cloudflare` shorthand is built

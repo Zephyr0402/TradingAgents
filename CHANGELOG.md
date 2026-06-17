@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.2.6] — 2026-06-17
+
+### Fixed
+
+- **Web UI: duplicate sessions for one ticker.** Front-end `bind()` was
+  re-running after `render()` had already attached the form's submit
+  listener, so each form submission fired two POSTs to `/api/tasks`.
+  Removed the redundant `bind()` call. Server now also de-duplicates
+  on `(ticker, trade_date, status IN pending|running)` and returns the
+  existing task id with `deduplicated: true`, so retries and racing
+  submits can no longer spawn a second session either.
+- **Web UI: detail view resets when tapping a tab.** `state.activeTab =
+  …; render()` dropped the page scroll and reset the `.tabs`
+  horizontal scroll to 0, so tapping a tab on the right edge looked
+  like nothing happened. The handler now mutates only the active
+  button class and the report container, then scrolls the new tab
+  into view. `render()` also preserves scroll position when re-rendering
+  the same view.
+- **Web UI: hung ollama blocks every other request.** A stuck
+  `propagate()` call used to hold a semaphore slot forever. The worker
+  is now wrapped in `asyncio.wait_for` with
+  `TRADINGAGENTS_WEB_RUN_TIMEOUT` (default 900s); on timeout the task
+  is marked failed and the semaphore is released.
+- **Web UI: SQLite cross-thread crash.** Worker threads could not
+  touch the connection created on the event-loop thread. SQLite is
+  now opened with `check_same_thread=False`.
+- **Web UI: spoofable client IP.** `_client_ip` trusted
+  `X-Forwarded-For` unconditionally, so any direct hit to the backend
+  could bypass the device whitelist. XFF is now only honored when
+  the immediate peer is in `TRADINGAGENTS_TRUSTED_PROXIES` (default
+  loopback + Docker bridge + 10.0.0.0/8).
+- **Web UI: device fingerprint churns on OS updates.** User-Agent
+  version tokens (e.g. `iPhone OS 17_4`) are stripped before hashing
+  so a Safari or iOS upgrade doesn't re-fingerprint the same device.
+- **Web UI: secrets.key not atomic.** A crash mid-write left a
+  half-written key and locked out every session. Switched to
+  tmp + `os.replace`.
+- **Web UI: unbounded LLM output in DB.** `final_decision`, agent
+  reports, and `error` are now truncated before persisting so a
+  runaway generation can't dump megabytes into SQLite or stall the
+  front-end renderer.
+- **Caddy: reverse_proxy port mismatch in docker-compose dev path.**
+  The compose file published the web container on host 8765 but the
+  bundled Caddyfile reverse-proxied to 8000 — fine if you also publish
+  the container on 8000, broken with the as-shipped `127.0.0.1:8765:8000`
+  mapping. Left unchanged so it keeps working with the production path
+  (uvicorn on host port 8000).
+
 ## [0.2.5] — 2026-05-11
 
 ### Added
@@ -332,6 +380,7 @@ PRs from late 2025 also landed here.
   portfolio manager. LangGraph orchestration, yfinance data, per-agent
   BM25 memory, single-provider OpenAI integration, interactive CLI.
 
+[0.2.5]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.1...v0.2.2
